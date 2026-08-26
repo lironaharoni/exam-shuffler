@@ -1,0 +1,25 @@
+{
+  "questions": [
+    {
+      "text": "What is the capital of France?",
+      "choices": [
+        "London",
+        "Paris",
+        "Madrid",
+        "Rome"
+      ],
+      "correct_choice_index": 1
+    },
+    {
+      "text": "2*2 is:",
+      "choices": [
+        "1",
+        "2",
+        "3",
+        "4"
+      ],
+      "correct_choice_index": 3
+    }
+  ]
+}
+
