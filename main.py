@@ -1,7 +1,9 @@
-import copy
-
-
+from generator import generate_versions
+from answer_key import generate_answer_key
+import display
 from models import Choice, Question, Exam
+
+
 london = Choice("London")
 paris = Choice("Paris")
 madrid = Choice("Madrid")
@@ -26,42 +28,14 @@ question2 = Question(
 
 exam = Exam([question1, question2])
 
-versions = []
-
-for i in range(3):
-    version = copy.deepcopy(exam)
-    version.shuffle_all_choices()
-    version.shuffle_questions()
-    versions.append(version)
+versions = generate_versions(exam, 3)
 
 print("ORIGINAL EXAM")
-
-for question in exam.questions:
-    print(question.text)
-
-    for choice in question.choices:
-        print(choice.text)
-
-    print("Correct answer:", question.correct_choice.text)
-    print()
+display.print_exam(exam)
 
 for i, version in enumerate(versions, start=1):
     print("VERSION", i)
+    display.print_exam(version)
 
-    for question in version.questions:
-        print(question.text)
-
-        for choice in question.choices:
-            print(choice.text)
-
-        print("Correct answer:", question.correct_choice.text)
-        print()
-
-    # רק אחרי שסיימנו את כל השאלות
-    print("ANSWER KEY")
-
-    for question_number, question in enumerate(version.questions, start=1):
-        correct_position = question.choices.index(question.correct_choice) + 1
-        print("Question", question_number, ":", correct_position)
-
-    print()
+    answer_key = generate_answer_key(version)
+    display.print_answer_key(answer_key)
