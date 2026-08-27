@@ -1,0 +1,12 @@
+{
+  "questions": [
+    {
+      "text": "What is the capital of France?",
+      "choices": [
+        "London",
+        "Paris"
+      ],
+      "correct_choice_index": 7
+    }
+  ]
+}

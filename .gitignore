@@ -2,3 +2,4 @@
 .vscode/
 __pycache__/
 version_*.txt
+.pytest_cache/
