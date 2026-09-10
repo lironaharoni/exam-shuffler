@@ -3,3 +3,8 @@
 __pycache__/
 version_*.txt
 .pytest_cache/
+version_pdf_test.pdf
+answer_key_pdf_test.pdf
+extracted_example_final.txt
+example_final.pdf
+tests/rtl_experiment.py
