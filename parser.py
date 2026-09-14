@@ -45,6 +45,7 @@ def parse_questions(text):
     current_question = None
 
     for line in lines:
+        line = line.strip()
         line_type = classify_line(line)
 
         if line_type == "QUESTION":
