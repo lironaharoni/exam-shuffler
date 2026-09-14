@@ -13,7 +13,3 @@ def extract_text_from_pdf(file_path):
             text += page_text + "\n"
 
     return text
-
-text = extract_text_from_pdf("example_final.pdf")
-with open("extracted_example_final.txt", "w", encoding="utf-8") as file:
-    file.write(text)
