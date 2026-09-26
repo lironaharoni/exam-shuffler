@@ -10,3 +10,14 @@ example_final.pdf
 tests/rtl_experiment.py
 english_exam_test.pdf
 exam_results.zip
+
+# Local Day 11 review artifacts and copied scanned input.
+/review_full_exam.json
+/review_full_exam.txt
+/review_processed_exam.pdf
+/review_real_scan.json
+/review_real_scan.txt
+/review_real_scan_overlay.pdf
+/review_visuals/
+/file.png
+/בוחן_ביולוגיה_של_התא_סרוק.pdf
