@@ -1,6 +1,8 @@
 .venv/
 .vscode/
 __pycache__/
+frontend/node_modules/
+frontend/dist/
 version_*.txt
 .pytest_cache/
 version_pdf_test.pdf
