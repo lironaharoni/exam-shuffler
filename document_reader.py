@@ -164,6 +164,20 @@ def _text_line_regions(text_page, page_height):
     ]
 
 
+def has_usable_native_text(
+    pdf_path, *, native_text_threshold=DEFAULT_NATIVE_TEXT_THRESHOLD
+):
+    """Return whether every page has enough native text to avoid OCR."""
+    pages = PdfReader(str(pdf_path)).pages
+    return bool(pages) and all(
+        sum(
+            not character.isspace()
+            for character in (page.extract_text() or "")
+        ) >= native_text_threshold
+        for page in pages
+    )
+
+
 def _run_tesseract(image_bytes, executable, languages, timeout, output_format=None):
     command = [
         executable,
