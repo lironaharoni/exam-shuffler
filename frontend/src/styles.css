@@ -210,6 +210,38 @@ h1 { margin: 0; font-size: 38px; line-height: 1.12; }
 .visual-list { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 11px; }
 .visual-image { display: block; max-width: min(100%, 340px); max-height: 205px; object-fit: contain; border: 1px solid var(--line); background: #fff; }
 
+.question-heading { flex-wrap: wrap; align-items: center; }
+.question-card.is-excluded { background: var(--paper-soft); opacity: 0.72; }
+.question-card.is-excluded .question-text, .question-card.is-excluded .choice-content { color: var(--muted); }
+.review-flag, .confirmed-flag { margin-inline-start: 0; padding: 1px 8px; border: 1px solid var(--warning-line); border-radius: 4px; color: var(--review-text); font-size: 12px; font-weight: 600; }
+.confirmed-flag { border-color: var(--line); color: var(--green); }
+.question-actions { display: flex; align-items: center; gap: 12px; margin-inline-start: auto; }
+.text-button { padding: 3px 0; border: 0; border-bottom: 1px solid var(--line); background: transparent; color: var(--green); cursor: pointer; font-size: 14px; font-weight: 600; transition: color 150ms ease, border-color 150ms ease; }
+.text-button:hover { border-color: var(--green); color: var(--green-dark); }
+.text-button:focus-visible, .remove-choice-button:focus-visible, .correct-answer-control:focus-within, .review-confirm-control:focus-within { outline: 2px solid var(--focus-ring); outline-offset: 3px; }
+.edit-field { display: block; width: 100%; min-width: 0; border: 1px solid var(--line); border-radius: 5px; padding: 8px 10px; background: var(--page); color: var(--ink); font: inherit; line-height: 1.55; resize: vertical; }
+.edit-field:focus { border-color: var(--focus-ring); outline: 2px solid color-mix(in srgb, var(--focus-ring) 28%, transparent); }
+.question-edit-field { margin-top: 13px; font-size: 19px; font-weight: 500; }
+.choice-edit-field { min-height: 38px; font-size: 16px; }
+.correct-answer-group { min-width: 0; margin: 12px 0 0; padding: 0; border: 0; }
+.correct-answer-group legend { padding: 0; color: var(--muted); font-size: 13px; font-weight: 600; }
+.correct-answer-group legend span { font-weight: 400; }
+.choice-list { margin-top: 5px; }
+.choice-row { grid-template-columns: 30px minmax(0, 1fr) auto 32px; align-items: start; }
+.correct-answer-control { display: inline-flex; min-height: 32px; align-items: center; gap: 5px; color: var(--muted); cursor: pointer; font-size: 13px; white-space: nowrap; }
+.correct-answer-control input, .review-confirm-control input { width: 16px; height: 16px; margin: 0; accent-color: var(--green); cursor: pointer; }
+.remove-choice-button { width: 30px; height: 30px; border: 1px solid transparent; border-radius: 4px; background: transparent; color: var(--coral); cursor: pointer; font-size: 21px; line-height: 1; }
+.remove-choice-button:hover { border-color: var(--line); background: var(--paper-soft); }
+.add-choice-button { margin-top: 5px; }
+.review-confirm-control { display: inline-flex; align-items: center; gap: 8px; margin-top: 15px; color: var(--muted); cursor: pointer; font-size: 14px; }
+.question-validation { margin: 12px 0 0; padding: 8px 30px 8px 10px; border-inline-start: 2px solid var(--coral); background: var(--error-bg); color: var(--error-text); font-size: 14px; }
+.review-footer { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-top: 20px; padding: 15px 0 0; border-top: 1px solid var(--line); color: var(--muted); font-size: 14px; }
+.confirm-button { min-width: 190px; }
+.completion-panel { margin-top: 18px; padding: 19px 21px; border-inline-start: 3px solid var(--green); background: var(--paper-soft); }
+.completion-panel h3 { margin: 0 0 10px; color: var(--green); font-family: var(--font-heading); font-size: 22px; font-weight: 500; }
+.completion-panel p { margin: 3px 0; }
+.completion-panel .text-button { margin-top: 12px; }
+
 @media (max-width: 600px) {
   .app-shell { padding: 26px 16px 48px; }
   .app-header { gap: 12px; padding-bottom: 15px; }
@@ -232,4 +264,12 @@ h1 { margin: 0; font-size: 38px; line-height: 1.12; }
   .question-card { padding: 15px 13px 17px; }
   .question-text { font-size: 18px; }
   .visual-image { max-height: 185px; }
+  .question-heading { gap: 8px; }
+  .question-actions { flex: 1 0 100%; justify-content: flex-start; margin-inline-start: 0; padding-top: 3px; }
+  .choice-row { grid-template-columns: 22px minmax(0, 1fr) auto 28px; gap: 6px; }
+  .correct-answer-control { gap: 4px; font-size: 12px; }
+  .review-footer { align-items: stretch; flex-direction: column; gap: 9px; }
+  .confirm-button { width: 100%; }
+  .completion-panel { padding: 16px 14px; }
+  .completion-panel h3 { font-size: 20px; }
 }
