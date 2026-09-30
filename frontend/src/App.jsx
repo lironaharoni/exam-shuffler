@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 
 const API_URL = "http://127.0.0.1:8000/analyze-exam";
+const GENERATE_URL = "http://127.0.0.1:8000/generate-versions";
 
 function formatError(response, payload) {
   const reason = payload?.detail?.reason;
@@ -94,6 +95,29 @@ function validateQuestion(question) {
   return issues;
 }
 
+function toReviewedGenerationExam(reviewExam) {
+  return {
+    answer_source: reviewExam.answer_source,
+    questions: reviewExam.questions
+      .filter((question) => question.included)
+      .map((question) => ({
+        reviewId: question.reviewId,
+        number: question.number,
+        text: question.text,
+        page_number: question.page_number,
+        question_visuals: question.question_visuals,
+        correct_choice_id: question.correct_choice_id,
+        included: true,
+        choices: question.choices.map((choice) => ({
+          reviewId: choice.reviewId,
+          label: choice.label,
+          text: choice.text,
+          visuals: choice.visuals,
+        })),
+      })),
+  };
+}
+
 function QuestionCard({ question, issues, showValidation, onChange }) {
   const [editing, setEditing] = useState(false);
 
@@ -112,6 +136,7 @@ function QuestionCard({ question, issues, showValidation, onChange }) {
       ...current,
       correct_choice_id: reviewId,
       correct_answer_label: selected?.label ?? null,
+      answer_source_attention: null,
     }));
   }
 
@@ -174,6 +199,9 @@ function QuestionCard({ question, issues, showValidation, onChange }) {
         <p className="question-text" dir="auto">{question.text || "לא זוהה נוסח לשאלה"}</p>
       )}
       <Visuals visuals={question.question_visuals} label={`שאלה ${question.number}`} />
+      {question.answer_source_attention && (
+        <p className="source-review-note" role="status">{question.answer_source_attention}</p>
+      )}
 
       <fieldset className="correct-answer-group">
         <legend>בחירת תשובה נכונה <span>(אפשר להשאיר ללא בחירה)</span></legend>
@@ -256,6 +284,17 @@ export default function App() {
   const [reviewExam, setReviewExam] = useState(null);
   const [reviewStage, setReviewStage] = useState("review");
   const [showValidation, setShowValidation] = useState(false);
+  const [reviewError, setReviewError] = useState("");
+  const [answerSource, setAnswerSource] = useState("none");
+  const [sameAnswerPosition, setSameAnswerPosition] = useState("");
+  const [generationSettings, setGenerationSettings] = useState({
+    number_of_versions: "3",
+    shuffle_questions: true,
+    shuffle_choices: true,
+  });
+  const [generationStatus, setGenerationStatus] = useState("idle");
+  const [generationError, setGenerationError] = useState("");
+  const [zipUrl, setZipUrl] = useState("");
   const [error, setError] = useState("");
 
   useEffect(() => {
@@ -270,6 +309,10 @@ export default function App() {
     setReviewExam(null);
     setReviewStage("review");
     setShowValidation(false);
+    setReviewError("");
+    setGenerationStatus("idle");
+    setGenerationError("");
+    setZipUrl("");
     setError("");
     setStatus("idle");
   }
@@ -283,8 +326,16 @@ export default function App() {
     setReviewExam(null);
     setReviewStage("review");
     setShowValidation(false);
+    setReviewError("");
+    setGenerationStatus("idle");
+    setGenerationError("");
+    setZipUrl("");
     const formData = new FormData();
     formData.append("file", file);
+    formData.append("answer_source", answerSource);
+    if (answerSource === "same_position" && sameAnswerPosition) {
+      formData.append("same_answer_position", sameAnswerPosition);
+    }
 
     try {
       const response = await fetch(API_URL, { method: "POST", body: formData });
@@ -340,10 +391,61 @@ export default function App() {
 
   function confirmReview() {
     setShowValidation(true);
+    setReviewError("");
+    if (includedCount === 0) {
+      setReviewError("יש לכלול לפחות שאלה אחת לפני האישור.");
+      return;
+    }
     const hasIssues = includedQuestions.some((question) => (
       validationByQuestion.get(question.reviewId).length > 0
     ));
-    if (!hasIssues) setReviewStage("confirmed");
+    if (!hasIssues) setReviewStage("generation");
+  }
+
+  async function generateVersions() {
+    setGenerationStatus("loading");
+    setGenerationError("");
+    try {
+      const response = await fetch(GENERATE_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          reviewed_exam: toReviewedGenerationExam(reviewExam),
+          settings: {
+            ...generationSettings,
+            number_of_versions: Number(generationSettings.number_of_versions),
+          },
+        }),
+      });
+      if (!response.ok) {
+        let payload;
+        try {
+          payload = await response.json();
+        } catch {
+          payload = null;
+        }
+        throw new Error(
+          payload?.detail?.message ||
+          "לא ניתן ליצור את קובצי המבחן. יש לבדוק את המבחן ולנסות שוב.",
+        );
+      }
+
+      const newZipUrl = URL.createObjectURL(await response.blob());
+      setZipUrl(newZipUrl);
+      const downloadLink = document.createElement("a");
+      downloadLink.href = newZipUrl;
+      downloadLink.download = "exam-versions.zip";
+      downloadLink.click();
+      setGenerationStatus("success");
+      setReviewStage("complete");
+    } catch (generationRequestError) {
+      setGenerationError(
+        generationRequestError instanceof TypeError
+          ? "לא ניתן להתחבר לשירות יצירת הגרסאות. יש לוודא שהשרת פועל ולנסות שוב."
+          : generationRequestError.message || "אירעה שגיאה ביצירת הגרסאות.",
+      );
+      setGenerationStatus("error");
+    }
   }
 
   return (
@@ -377,6 +479,57 @@ export default function App() {
             </div>
           </div>
 
+          <fieldset className="answer-source-panel" disabled={Boolean(analysis) || status === "loading"}>
+            <legend>מקור התשובות הנכונות</legend>
+            <div className="answer-source-options">
+              <label className="answer-source-option">
+                <input
+                  type="radio"
+                  name="answer-source"
+                  value="none"
+                  checked={answerSource === "none"}
+                  onChange={() => setAnswerSource("none")}
+                />
+                <span>אין תשובות נכונות מוגדרות</span>
+              </label>
+              <label className="answer-source-option">
+                <input
+                  type="radio"
+                  name="answer-source"
+                  value="same_position"
+                  checked={answerSource === "same_position"}
+                  onChange={() => setAnswerSource("same_position")}
+                />
+                <span>אותה תשובה נכונה בכל השאלות</span>
+              </label>
+              <label className="answer-source-option">
+                <input
+                  type="radio"
+                  name="answer-source"
+                  value="manual"
+                  checked={answerSource === "manual"}
+                  onChange={() => setAnswerSource("manual")}
+                />
+                <span>אגדיר תשובות לפי הצורך</span>
+              </label>
+            </div>
+            {answerSource === "same_position" && (
+              <label className="answer-position-control">
+                <span>מיקום התשובה הנכונה</span>
+                <select
+                  value={sameAnswerPosition}
+                  onChange={(event) => setSameAnswerPosition(event.target.value)}
+                  aria-label="מיקום התשובה הנכונה בכל שאלה"
+                >
+                  <option value="">בחירת מיקום</option>
+                  {Array.from({ length: 10 }, (_, index) => (
+                    <option value={String(index + 1)} key={index}>תשובה {index + 1}</option>
+                  ))}
+                </select>
+              </label>
+            )}
+          </fieldset>
+
           <div className="upload-controls">
             <label className="file-picker">
               <input
@@ -395,7 +548,7 @@ export default function App() {
               className="analyze-button"
               type="button"
               onClick={analyze}
-              disabled={!file || status === "loading"}
+              disabled={!file || status === "loading" || (answerSource === "same_position" && !sameAnswerPosition)}
             >
               {status === "loading" ? (
                 <><span className="spinner" aria-hidden="true" />מנתח את המבחן...</>
@@ -417,21 +570,25 @@ export default function App() {
           <section className="results-section" aria-labelledby="results-title">
             <div className="results-heading">
               <div>
-                <p className="eyebrow">{reviewStage === "review" ? "בדיקה ועריכה" : "הבדיקה הושלמה"}</p>
-                <h2 id="results-title">{reviewStage === "review" ? "סקירת המבחן" : "המבחן מוכן לשלב הבא"}</h2>
+                <p className="eyebrow">
+                  {reviewStage === "review" ? "בדיקה ועריכה" : reviewStage === "generation" ? "הגדרות יצירה" : "היצירה הושלמה"}
+                </p>
+                <h2 id="results-title">
+                  {reviewStage === "review" ? "סקירת המבחן" : reviewStage === "generation" ? "הגדרת גרסאות המבחן" : "גרסאות המבחן מוכנות"}
+                </h2>
               </div>
               <span className="question-count">{includedCount} מתוך {totalCount} שאלות ייכללו</span>
             </div>
 
-            {reviewStage === "confirmed" ? (
+            {reviewStage === "complete" ? (
               <div className="completion-panel" role="status">
-                <h3>המבחן מוכן לשלב יצירת הגרסאות</h3>
-                <p>{includedCount} שאלות ייכללו</p>
-                <p>{correctCount} תשובות נכונות הוגדרו</p>
-                <p>{includedCount - correctCount} תשובות עדיין לא הוגדרו</p>
-                <button className="text-button" type="button" onClick={() => setReviewStage("review")}>חזרה לעריכה</button>
+                <h3>הגרסאות וקובצי התשובות נוצרו</h3>
+                <p>נוצרו {generationSettings.number_of_versions} מבחנים ומפתחות תשובות.</p>
+                <p>{includedCount} שאלות בכל גרסה · {correctCount} תשובות ידועות · {includedCount - correctCount} לא הוגדרו</p>
+                {zipUrl && <a className="text-button download-link" href={zipUrl} download="exam-versions.zip">הורדת קובץ ZIP שוב</a>}
+                <button className="text-button" type="button" onClick={() => setReviewStage("generation")}>חזרה להגדרות</button>
               </div>
-            ) : (
+            ) : reviewStage === "review" ? (
               <div className="summary-strip">
                 <div className="summary-item">
                   <span className="summary-label">סטטוס הניתוח</span>
@@ -448,9 +605,9 @@ export default function App() {
                   <span className="summary-value">{correctCount}</span>
                 </div>
               </div>
-            )}
+            ) : null}
 
-            {warnings.length > 0 && (
+            {reviewStage === "review" && warnings.length > 0 && (
               <aside className="warning-panel" aria-label="הערות לניתוח">
                 <h3>הערות לבדיקה</h3>
                 <ul>{warnings.map((warning, index) => <li key={`${index}-${warning}`}>{warning}</li>)}</ul>
@@ -472,11 +629,68 @@ export default function App() {
                 </div>
                 <div className="review-footer">
                   <span>{includedCount} מתוך {totalCount} שאלות ייכללו</span>
-                  <button className="analyze-button confirm-button" type="button" onClick={confirmReview}>
+                  <div className="review-actions-footer">
+                    {reviewError && <p className="question-validation footer-validation" role="alert">{reviewError}</p>}
+                    <button className="analyze-button confirm-button" type="button" onClick={confirmReview}>
                     אישור המבחן והמשך
-                  </button>
+                    </button>
+                  </div>
                 </div>
               </>
+            )}
+
+            {reviewStage === "generation" && (
+              <div className="generation-panel">
+                <div className="summary-strip generation-summary">
+                  <div className="summary-item"><span className="summary-label">שאלות</span><span className="summary-value">{includedCount}</span></div>
+                  <div className="summary-item"><span className="summary-label">גרסאות</span><span className="summary-value">{generationSettings.number_of_versions || "—"}</span></div>
+                  <div className="summary-item"><span className="summary-label">ערבוב שאלות</span><span className="summary-value">{generationSettings.shuffle_questions ? "כן" : "לא"}</span></div>
+                  <div className="summary-item"><span className="summary-label">ערבוב תשובות</span><span className="summary-value">{generationSettings.shuffle_choices ? "כן" : "לא"}</span></div>
+                  <div className="summary-item"><span className="summary-label">תשובות ידועות</span><span className="summary-value">{correctCount}</span></div>
+                  <div className="summary-item"><span className="summary-label">תשובות לא ידועות</span><span className="summary-value">{includedCount - correctCount}</span></div>
+                </div>
+                <div className="generation-controls">
+                  <label className="version-count-control">
+                    <span>מספר גרסאות</span>
+                    <input
+                      type="number"
+                      min="1"
+                      max="10"
+                      step="1"
+                      value={generationSettings.number_of_versions}
+                      onChange={(event) => setGenerationSettings((current) => ({ ...current, number_of_versions: event.target.value }))}
+                    />
+                  </label>
+                  <label className="setting-toggle">
+                    <input
+                      type="checkbox"
+                      checked={generationSettings.shuffle_questions}
+                      onChange={(event) => setGenerationSettings((current) => ({ ...current, shuffle_questions: event.target.checked }))}
+                    />
+                    <span>ערבוב סדר השאלות</span>
+                  </label>
+                  <label className="setting-toggle">
+                    <input
+                      type="checkbox"
+                      checked={generationSettings.shuffle_choices}
+                      onChange={(event) => setGenerationSettings((current) => ({ ...current, shuffle_choices: event.target.checked }))}
+                    />
+                    <span>ערבוב סדר התשובות</span>
+                  </label>
+                </div>
+                {generationError && <p className="error-message generation-error" role="alert">{generationError}</p>}
+                <div className="generation-actions">
+                  <button className="text-button" type="button" onClick={() => setReviewStage("review")} disabled={generationStatus === "loading"}>חזרה לבדיקה</button>
+                  <button
+                    className="analyze-button confirm-button"
+                    type="button"
+                    onClick={generateVersions}
+                    disabled={generationStatus === "loading" || Number(generationSettings.number_of_versions) < 1 || Number(generationSettings.number_of_versions) > 10}
+                  >
+                    {generationStatus === "loading" ? <><span className="spinner" aria-hidden="true" />יוצר גרסאות...</> : "יצירת גרסאות"}
+                  </button>
+                </div>
+              </div>
             )}
           </section>
         )}

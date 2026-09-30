@@ -2,7 +2,7 @@ from base64 import b64encode
 from io import BytesIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from zipfile import ZipFile
+from zipfile import ZIP_DEFLATED, ZipFile
 
 import pymupdf
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
@@ -13,6 +13,15 @@ from pypdf.errors import PdfReadError
 from document_reader import has_usable_native_text, read_pdf_pages
 from exam_analyzer import analyze_exam
 from pipeline import run_pipeline
+from reviewed_exporter import (
+    export_reviewed_answer_key_pdf,
+    export_reviewed_exam_pdf,
+)
+from reviewed_generation import (
+    ReviewedGenerationRequest,
+    apply_answer_source,
+    generate_reviewed_versions,
+)
 
 
 app = FastAPI()
@@ -103,7 +112,21 @@ def _embed_visual_data(analysis, pdf_path):
 
 
 @app.post("/analyze-exam")
-def analyze_exam_upload(file: UploadFile = File(...)):
+def analyze_exam_upload(
+    file: UploadFile = File(...),
+    answer_source: str = Form("manual"),
+    same_answer_position: int | None = Form(None, ge=1, le=10),
+):
+    if answer_source not in {"none", "same_position", "manual"} or (
+        (answer_source == "same_position") != (same_answer_position is not None)
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "reason": "invalid_answer_source",
+                "message": "Choose a valid answer source and position.",
+            },
+        )
     uploaded_bytes = file.file.read()
     if b"%PDF-" not in uploaded_bytes[:1024]:
         raise HTTPException(
@@ -147,4 +170,52 @@ def analyze_exam_upload(file: UploadFile = File(...)):
 
         analysis = analyze_exam(readings)
         _embed_visual_data(analysis, pdf_path)
-        return analysis
+        return apply_answer_source(
+            analysis,
+            answer_source,
+            same_answer_position,
+        )
+
+
+@app.post("/generate-versions")
+def generate_reviewed_exam(request: ReviewedGenerationRequest):
+    try:
+        versions = generate_reviewed_versions(
+            request.reviewed_exam,
+            request.settings,
+        )
+    except ValueError as error:
+        raise HTTPException(
+            status_code=422,
+            detail={"reason": "invalid_reviewed_exam", "message": str(error)},
+        ) from error
+
+    with TemporaryDirectory() as temporary_directory:
+        output_directory = Path(temporary_directory)
+        zip_buffer = BytesIO()
+        with ZipFile(zip_buffer, "w", compression=ZIP_DEFLATED) as zip_file:
+            for version_index, version in enumerate(versions):
+                suffix = chr(ord("A") + version_index)
+                exam_name = f"exam-version-{suffix}.pdf"
+                answer_key_name = f"answer-key-{suffix}.pdf"
+                exam_path = output_directory / exam_name
+                answer_key_path = output_directory / answer_key_name
+                export_reviewed_exam_pdf(
+                    version.questions,
+                    exam_path,
+                    output_directory / f"assets-exam-{suffix}",
+                )
+                export_reviewed_answer_key_pdf(
+                    version.questions,
+                    version.answer_positions,
+                    answer_key_path,
+                    output_directory / f"assets-key-{suffix}",
+                )
+                zip_file.write(exam_path, exam_name)
+                zip_file.write(answer_key_path, answer_key_name)
+
+    return Response(
+        content=zip_buffer.getvalue(),
+        media_type="application/zip",
+        headers={"Content-Disposition": "attachment; filename=exam-versions.zip"},
+    )
