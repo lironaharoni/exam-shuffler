@@ -6,11 +6,13 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1 --strictPort",
     "build": "vite build",
+    "test": "node --test",
     "preview": "vite preview --host 127.0.0.1 --strictPort"
   },
   "dependencies": {
     "@fontsource/heebo": "^5.3.0",
     "@fontsource/rubik": "^5.3.0",
+    "fflate": "^0.8.2",
     "react": "^19.1.0",
     "react-dom": "^19.1.0"
   },

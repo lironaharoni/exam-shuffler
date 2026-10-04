@@ -14,6 +14,7 @@ from document_reader import has_usable_native_text, read_pdf_pages
 from exam_analyzer import analyze_exam
 from pipeline import run_pipeline
 from reviewed_exporter import (
+    append_pdf_files,
     export_reviewed_answer_key_pdf,
     export_reviewed_exam_pdf,
 )
@@ -118,7 +119,7 @@ def analyze_exam_upload(
     same_answer_position: int | None = Form(None, ge=1, le=10),
 ):
     if answer_source not in {"none", "same_position", "manual"} or (
-        (answer_source == "same_position") != (same_answer_position is not None)
+        answer_source != "same_position" and same_answer_position is not None
     ):
         raise HTTPException(
             status_code=422,
@@ -200,10 +201,19 @@ def generate_reviewed_exam(request: ReviewedGenerationRequest):
                 answer_key_name = f"answer-key-{suffix}.pdf"
                 exam_path = output_directory / exam_name
                 answer_key_path = output_directory / answer_key_name
+                append_answer_key = request.settings.answer_key_mode in {
+                    "appended", "both"
+                }
+                rendered_exam_path = (
+                    output_directory / f"exam-content-{suffix}.pdf"
+                    if append_answer_key
+                    else exam_path
+                )
                 export_reviewed_exam_pdf(
                     version.questions,
-                    exam_path,
+                    rendered_exam_path,
                     output_directory / f"assets-exam-{suffix}",
+                    version.preamble_lines,
                 )
                 export_reviewed_answer_key_pdf(
                     version.questions,
@@ -211,8 +221,11 @@ def generate_reviewed_exam(request: ReviewedGenerationRequest):
                     answer_key_path,
                     output_directory / f"assets-key-{suffix}",
                 )
+                if append_answer_key:
+                    append_pdf_files(rendered_exam_path, answer_key_path, exam_path)
                 zip_file.write(exam_path, exam_name)
-                zip_file.write(answer_key_path, answer_key_name)
+                if request.settings.answer_key_mode in {"separate", "both"}:
+                    zip_file.write(answer_key_path, answer_key_name)
 
     return Response(
         content=zip_buffer.getvalue(),

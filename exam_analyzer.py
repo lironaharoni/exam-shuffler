@@ -71,6 +71,9 @@ def _preamble_type(text):
     if any(cue in normalized for cue in (
         "עליכם", "בהצלחה", "בחרו", "ענו", "שאלות רב ברירה",
         "תשובה אחת נכונה", "משקל כל השאלות",
+        "משך הבוחן", "משך המבחן", "משך הבחינה", "זמן הבחינה",
+        "חומר עזר", "חומר מותר", "הוראות",
+        "duration", "allowed material", "instructions",
     )):
         return "instructions"
     return "metadata"

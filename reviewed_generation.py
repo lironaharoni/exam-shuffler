@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 
 AnswerSourceMode = Literal["none", "same_position", "manual"]
+AnswerKeyMode = Literal["separate", "appended", "both"]
 
 
 class InputModel(BaseModel):
@@ -67,15 +68,27 @@ class ReviewedQuestion(InputModel):
     included: bool = True
 
 
+class PreambleLine(InputModel):
+    text: str = Field(max_length=2_000)
+    type: Literal["header", "metadata", "instructions"]
+
+
+class ReviewedPreamble(InputModel):
+    enabled: bool = True
+    lines: list[PreambleLine] = Field(default_factory=list, max_length=200)
+
+
 class ReviewedExam(InputModel):
     questions: list[ReviewedQuestion] = Field(max_length=500)
     answer_source: AnswerSource = Field(default_factory=AnswerSource)
+    preamble: ReviewedPreamble = Field(default_factory=ReviewedPreamble)
 
 
 class GenerationSettings(InputModel):
     number_of_versions: int = Field(ge=1, le=10)
     shuffle_questions: bool = True
     shuffle_choices: bool = True
+    answer_key_mode: AnswerKeyMode = "separate"
 
 
 class ReviewedGenerationRequest(InputModel):
@@ -87,21 +100,22 @@ class ReviewedGenerationRequest(InputModel):
 class GeneratedVersion:
     questions: list[ReviewedQuestion]
     answer_positions: list[int | None]
+    preamble_lines: list[PreambleLine]
 
 
 def apply_answer_source(analysis, mode, position=None):
     if mode not in {"none", "same_position", "manual"}:
         raise ValueError("unsupported answer source")
-    if (mode == "same_position") != (position is not None) or (
-        position is not None and not 1 <= position <= 10
-    ):
+    if mode != "same_position" and position is not None:
+        raise ValueError("position is supported only for same_position answer source")
+    if position is not None and not 1 <= position <= 10:
         raise ValueError("same_position answer source requires a position from 1 to 10")
 
     for question in analysis["questions"]:
         question["answer_source_attention"] = None
         if mode == "none":
             question["correct_answer_label"] = None
-        elif mode == "same_position":
+        elif mode == "same_position" and position is not None:
             choices = question.get("choices", [])
             if position <= len(choices):
                 question["correct_answer_label"] = choices[position - 1]["label"]
@@ -155,6 +169,11 @@ def build_generation_questions(reviewed_exam):
 
 def generate_reviewed_versions(reviewed_exam, settings, rng=None):
     original_questions = build_generation_questions(reviewed_exam)
+    preamble_lines = (
+        copy.deepcopy(reviewed_exam.preamble.lines)
+        if reviewed_exam.preamble.enabled
+        else []
+    )
     randomizer = rng or random.Random()
     versions = []
 
@@ -178,6 +197,10 @@ def generate_reviewed_versions(reviewed_exam, settings, rng=None):
             )
             answer_positions.append(position)
 
-        versions.append(GeneratedVersion(questions, answer_positions))
+        versions.append(GeneratedVersion(
+            questions,
+            answer_positions,
+            copy.deepcopy(preamble_lines),
+        ))
 
     return versions

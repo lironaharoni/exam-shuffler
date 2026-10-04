@@ -60,6 +60,23 @@ def test_analyzes_numbered_hebrew_question_choices_and_preamble():
     assert result["analysis_warnings"] == []
 
 
+def test_classifies_duration_allowed_material_and_instructions_as_instructions():
+    result = analyze_exam([_page(
+        1,
+        "Example College\nCourse: Biology\nDuration: 90 minutes\n"
+        "Allowed material: none\nInstructions: choose one answer\n"
+        "1. What is correct?\nA. First\nB. Second",
+    )])
+
+    ignored_by_text = {
+        item["text"]: item["type"] for item in result["ignored_content"]
+    }
+    assert ignored_by_text["Duration: 90 minutes"] == "instructions"
+    assert ignored_by_text["Allowed material: none"] == "instructions"
+    assert ignored_by_text["Instructions: choose one answer"] == "instructions"
+    assert ignored_by_text["Course: Biology"] == "metadata"
+
+
 def test_preserves_multiline_text_and_flags_ambiguous_or_visual_content():
     result = analyze_exam([
         _page(

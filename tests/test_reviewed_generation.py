@@ -4,6 +4,7 @@ from pathlib import Path
 from zipfile import ZipFile
 
 import pymupdf
+import pytest
 from fastapi.testclient import TestClient
 
 from api import app
@@ -52,10 +53,11 @@ def make_question(identity, number, text, choices, correct_choice_id=None, inclu
     }
 
 
-def make_reviewed_exam(questions, answer_source=None):
+def make_reviewed_exam(questions, answer_source=None, preamble=None):
     return ReviewedExam.model_validate({
         "questions": questions,
         "answer_source": answer_source or {"mode": "manual", "position": None},
+        "preamble": preamble or {"enabled": True, "lines": []},
     })
 
 
@@ -137,15 +139,17 @@ def test_analyze_endpoint_applies_same_answer_source_by_position():
     assert analysis["questions"][0]["correct_answer_label"] == "B"
 
 
-def test_analyze_endpoint_rejects_same_position_without_position():
+def test_analyze_endpoint_defers_same_position_choice_until_after_analysis():
     response = client.post(
         "/analyze-exam",
         files={"file": ("position.pdf", create_native_exam_pdf(), "application/pdf")},
         data={"answer_source": "same_position"},
     )
 
-    assert response.status_code == 422
-    assert response.json()["detail"]["reason"] == "invalid_answer_source"
+    assert response.status_code == 200
+    analysis = response.json()
+    assert analysis["answer_source"] == {"mode": "same_position", "position": None}
+    assert analysis["questions"][0]["correct_answer_label"] is None
 
 
 def test_no_known_answers_clears_existing_answers_but_manual_preserves_them():
@@ -231,7 +235,7 @@ def test_answer_key_uses_unknown_marker_for_partial_answers(tmp_path):
     text = "\n".join(page.get_text() for page in document).replace("\xa0", " ")
     document.close()
 
-    assert "A" in text
+    assert "1" in text
     assert "—" in text
     assert "תשובה נכונה לא הוגדרה" in text
 
@@ -417,3 +421,303 @@ def test_generation_endpoint_rejects_no_included_questions():
     )
 
     assert response.status_code == 422
+
+
+@pytest.mark.parametrize(
+    ("answer_key_mode", "expected_names", "appended"),
+    [
+        ("separate", {"exam-version-A.pdf", "answer-key-A.pdf"}, False),
+        ("appended", {"exam-version-A.pdf"}, True),
+        ("both", {"exam-version-A.pdf", "answer-key-A.pdf"}, True),
+    ],
+)
+def test_answer_key_output_modes_control_zip_contents(
+    answer_key_mode,
+    expected_names,
+    appended,
+):
+    payload = {
+        "reviewed_exam": {
+            "answer_source": {"mode": "manual", "position": None},
+            "questions": [
+                make_question(
+                    "mode-q1",
+                    1,
+                    "Mode question",
+                    [
+                        make_choice("mode-c1", "A", "First choice"),
+                        make_choice("mode-c2", "B", "Second choice"),
+                    ],
+                    "mode-c2",
+                )
+            ],
+        },
+        "settings": {
+            "number_of_versions": 1,
+            "shuffle_questions": False,
+            "shuffle_choices": False,
+            "answer_key_mode": answer_key_mode,
+        },
+    }
+
+    response = client.post("/generate-versions", json=payload)
+
+    assert response.status_code == 200
+    with ZipFile(BytesIO(response.content)) as archive:
+        assert set(archive.namelist()) == expected_names
+        exam = pymupdf.open(
+            stream=archive.read("exam-version-A.pdf"),
+            filetype="pdf",
+        )
+        assert (len(exam) > 1) is appended
+        exam.close()
+
+
+def test_reviewed_preamble_is_preserved_and_disabled_preamble_is_not_rendered(tmp_path):
+    question = make_question(
+        "preamble-q1",
+        1,
+        "Question after preamble",
+        [
+            make_choice("preamble-c1", "A", "First"),
+            make_choice("preamble-c2", "B", "Second"),
+        ],
+    )
+    preamble = {
+        "enabled": True,
+        "lines": [
+            {"type": "header", "text": "Example University"},
+            {"type": "metadata", "text": "Duration: 90 minutes"},
+            {"type": "instructions", "text": "Choose one answer"},
+        ],
+    }
+    reviewed_exam = make_reviewed_exam([question], preamble=preamble)
+    version = generate_reviewed_versions(
+        reviewed_exam,
+        GenerationSettings(
+            number_of_versions=1,
+            shuffle_questions=False,
+            shuffle_choices=False,
+        ),
+    )[0]
+    assert [line.text for line in version.preamble_lines] == [
+        "Example University",
+        "Duration: 90 minutes",
+        "Choose one answer",
+    ]
+
+    enabled_output = tmp_path / "preamble-enabled.pdf"
+    export_reviewed_exam_pdf(
+        version.questions,
+        enabled_output,
+        tmp_path / "preamble-enabled-assets",
+        version.preamble_lines,
+    )
+    enabled_document = pymupdf.open(enabled_output)
+    enabled_text = " ".join(page.get_text() for page in enabled_document)
+    enabled_document.close()
+    assert "Example University" in enabled_text
+    assert "Duration: 90 minutes" in enabled_text
+    assert "Choose one answer" in enabled_text
+
+    disabled_exam = make_reviewed_exam(
+        [question],
+        preamble={**preamble, "enabled": False},
+    )
+    disabled_version = generate_reviewed_versions(
+        disabled_exam,
+        GenerationSettings(
+            number_of_versions=1,
+            shuffle_questions=False,
+            shuffle_choices=False,
+        ),
+    )[0]
+    disabled_output = tmp_path / "preamble-disabled.pdf"
+    export_reviewed_exam_pdf(
+        disabled_version.questions,
+        disabled_output,
+        tmp_path / "preamble-disabled-assets",
+        disabled_version.preamble_lines,
+    )
+    disabled_document = pymupdf.open(disabled_output)
+    disabled_text = " ".join(page.get_text() for page in disabled_document)
+    disabled_document.close()
+    assert "Example University" not in disabled_text
+    assert "Choose one answer" not in disabled_text
+
+
+def _find_word(words, token):
+    return next(word for word in words if word[4] == token)
+
+
+def _nearest_number_on_row(words, token_word, expected_label):
+    candidates = [
+        word for word in words
+        if word[4] == expected_label
+        and abs(word[1] - token_word[1]) < 3
+    ]
+    assert candidates
+    return min(candidates, key=lambda word: abs(word[0] - token_word[0]))
+
+
+def _number_start_on_row(words, token_word, expected_number="1"):
+    candidates = [
+        word for word in words
+        if word[4] == expected_number
+        and abs(word[1] - token_word[1]) < 3
+    ]
+    assert candidates
+    number = max(candidates, key=lambda word: word[0])
+    periods = [
+        word for word in words
+        if word[4] == "." and abs(word[1] - token_word[1]) < 3
+    ]
+    assert periods
+    assert any(abs(period[2] - number[0]) < 8 for period in periods)
+    return number
+
+
+def test_pdf_numbering_and_mixed_direction_content_stay_in_visual_rows(tmp_path):
+    question = make_question(
+        "mixed-q1",
+        1,
+        "שאלה MixedStemToken בעברית RNA polymerase DNA E. coli 2 + 5 3' 5' COOH",
+        [
+            make_choice("mixed-c1", "A", "ChoiceTokenOne DNA 2 + 5"),
+            make_choice("mixed-c2", "B", "ChoiceTokenTwo E. coli COOH"),
+        ],
+    )
+    reviewed_question = make_reviewed_exam([question]).questions[0]
+    output = tmp_path / "mixed.pdf"
+    export_reviewed_exam_pdf(
+        [reviewed_question],
+        output,
+        tmp_path / "mixed-assets",
+    )
+
+    document = pymupdf.open(output)
+    words = document[0].get_text("words")
+    text = " ".join(word[4] for word in words)
+    stem = _find_word(words, "MixedStemToken")
+    first_choice = _find_word(words, "ChoiceTokenOne")
+    question_number = _number_start_on_row(words, stem)
+    choice_number = _number_start_on_row(words, first_choice)
+    assert abs(question_number[1] - stem[1]) < 3
+    assert abs(choice_number[1] - first_choice[1]) < 3
+    assert question_number[0] > stem[0]
+    assert choice_number[0] > first_choice[0]
+    assert "RNA" in text
+    assert "DNA" in text
+    assert "E." in text and "coli" in text
+    assert "COOH" in text
+    assert "+" in text
+    numeric_choice_run = [
+        next(
+            word for word in words
+            if word[4] == token and abs(word[1] - first_choice[1]) < 3
+        )
+        for token in ("2", "+", "5")
+    ]
+    assert [word[0] for word in numeric_choice_run] == sorted(
+        word[0] for word in numeric_choice_run
+    )
+    document.close()
+
+
+@pytest.mark.parametrize("embedded_tokens", [
+    ["DNA"],
+    ["RNA", "polymerase"],
+    ["E.", "coli"],
+    ["2", "+", "5"],
+    ["3'", "/", "5'"],
+    ["COOH"],
+])
+def test_hebrew_ltr_run_keeps_logical_visual_order_without_changing_source(
+    tmp_path,
+    embedded_tokens,
+):
+    embedded = " ".join(embedded_tokens)
+    source_text = f"לפני {embedded} אחרי"
+    question = make_question(
+        "bidi-q1",
+        1,
+        source_text,
+        [
+            make_choice("bidi-c1", "A", source_text),
+            make_choice("bidi-c2", "B", "אפשרות נוספת"),
+        ],
+    )
+    reviewed_question = make_reviewed_exam([question]).questions[0]
+    assert reviewed_question.text == source_text
+    assert reviewed_question.choices[0].text == source_text
+
+    output = tmp_path / "bidi.pdf"
+    export_reviewed_exam_pdf(
+        [reviewed_question],
+        output,
+        tmp_path / "bidi-assets",
+    )
+
+    document = pymupdf.open(output)
+    words = document[0].get_text("words")
+    prefix = _find_word(words, "לפני")
+    suffix = _find_word(words, "אחרי")
+    run = [_find_word(words, token) for token in embedded_tokens]
+    number = _number_start_on_row(words, prefix)
+
+    assert all(abs(word[1] - prefix[1]) < 3 for word in [suffix, *run])
+    assert number[0] > prefix[0] > run[0][0]
+    assert run[-1][2] > suffix[0]
+    assert [word[0] for word in run] == sorted(word[0] for word in run)
+    document.close()
+
+
+def large_image_data_url(color):
+    pixmap = pymupdf.Pixmap(
+        pymupdf.csRGB,
+        pymupdf.IRect(0, 0, 500, 350),
+        False,
+    )
+    pixmap.clear_with(color)
+    encoded = base64.b64encode(pixmap.tobytes("png")).decode("ascii")
+    pixmap = None
+    return f"data:image/png;base64,{encoded}"
+
+
+def test_visual_choice_label_stays_with_image_across_pagination(tmp_path):
+    choices = [
+        make_choice(
+            f"visual-c{index}",
+            str(index),
+            f"VisualChoiceToken{index}",
+            [{"data_url": large_image_data_url(0x220000 * index)}],
+        )
+        for index in range(1, 6)
+    ]
+    reviewed_question = make_reviewed_exam([
+        make_question("visual-q1", 1, "Image choices", choices),
+    ]).questions[0]
+    output = tmp_path / "visual-pagination.pdf"
+    export_reviewed_exam_pdf(
+        [reviewed_question],
+        output,
+        tmp_path / "visual-pagination-assets",
+    )
+
+    document = pymupdf.open(output)
+    assert len(document) > 1
+    image_count = 0
+    for page in document:
+        words = page.get_text("words")
+        for image in page.get_image_info():
+            image_count += 1
+            image_top = image["bbox"][1]
+            labels = [
+                word for word in words
+                if word[4].rstrip(".").isdigit()
+                and word[3] <= image_top + 2
+                and image_top - word[3] < 45
+            ]
+            assert labels, "a visual choice image was orphaned from its numeric label"
+    assert image_count == 5
+    document.close()

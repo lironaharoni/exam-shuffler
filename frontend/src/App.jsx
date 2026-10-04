@@ -1,4 +1,19 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import {
+  DEFAULT_GENERATION_SETTINGS,
+  applySharedAnswerPosition,
+  buildReviewedGenerationExam,
+  clearSharedAnswerPosition,
+  getCommonAnswerPositions,
+  getIncludedQuestions,
+  getPreservablePreambleItems,
+  getQuestionIssues,
+  getQuickShuffleEligibility,
+} from "./examLogic.js";
+import {
+  createGeneratedPdfDownloads,
+  revokeGeneratedPdfUrls,
+} from "./generatedFiles.js";
 
 const API_URL = "http://127.0.0.1:8000/analyze-exam";
 const GENERATE_URL = "http://127.0.0.1:8000/generate-versions";
@@ -38,8 +53,18 @@ function Visuals({ visuals, label }) {
 
 function createReviewExam(payload) {
   const clonedPayload = structuredClone(payload);
+  const preambleLines = getPreservablePreambleItems(clonedPayload.ignored_content)
+    .map((item) => ({
+      reviewId: crypto.randomUUID(),
+      type: item.type,
+      text: item.text,
+    }));
   return {
     ...clonedPayload,
+    preamble: {
+      enabled: preambleLines.length > 0,
+      lines: preambleLines,
+    },
     questions: clonedPayload.questions.map((question) => {
       const choices = (question.choices || []).map((choice) => ({
         ...choice,
@@ -81,44 +106,7 @@ function nextChoiceLabel(choices) {
   return `תשובה ${suffix}`;
 }
 
-function validateQuestion(question) {
-  const issues = [];
-  if (!question.text.trim()) issues.push("יש למלא את נוסח השאלה.");
-  if (question.choices.length < 2) issues.push("יש להוסיף לפחות שתי תשובות.");
-  const labels = question.choices.map((choice) => String(choice.label));
-  if (new Set(labels).size !== labels.length) {
-    issues.push("תוויות התשובות חייבות להיות ייחודיות.");
-  }
-  if (question.choices.some((choice) => !choice.text.trim() && !choice.visuals?.length)) {
-    issues.push("לכל תשובה חייב להיות תוכן או תמונה.");
-  }
-  return issues;
-}
-
-function toReviewedGenerationExam(reviewExam) {
-  return {
-    answer_source: reviewExam.answer_source,
-    questions: reviewExam.questions
-      .filter((question) => question.included)
-      .map((question) => ({
-        reviewId: question.reviewId,
-        number: question.number,
-        text: question.text,
-        page_number: question.page_number,
-        question_visuals: question.question_visuals,
-        correct_choice_id: question.correct_choice_id,
-        included: true,
-        choices: question.choices.map((choice) => ({
-          reviewId: choice.reviewId,
-          label: choice.label,
-          text: choice.text,
-          visuals: choice.visuals,
-        })),
-      })),
-  };
-}
-
-function QuestionCard({ question, issues, showValidation, onChange }) {
+function QuestionCard({ question, issues, showValidation, sharedAnswerMode, onChange }) {
   const [editing, setEditing] = useState(false);
 
   function updateChoice(reviewId, patch) {
@@ -232,9 +220,10 @@ function QuestionCard({ question, issues, showValidation, onChange }) {
                   name={`correct-${question.reviewId}`}
                   checked={question.correct_choice_id === choice.reviewId}
                   onChange={() => selectCorrectAnswer(choice.reviewId)}
+                  disabled={sharedAnswerMode}
                   aria-label={`סימון תשובה ${choice.label} כנכונה`}
                 />
-                <span>נכונה</span>
+                <span>{sharedAnswerMode ? "לפי המיקום המשותף" : "נכונה"}</span>
               </label>
               {editing && (
                 <button
@@ -268,6 +257,86 @@ function QuestionCard({ question, issues, showValidation, onChange }) {
   );
 }
 
+function SharedAnswerPositionControl({
+  positions,
+  value,
+  notice,
+  onChange,
+}) {
+  return (
+    <div className="shared-position-panel">
+      <label className="answer-position-control">
+        <span>מיקום התשובה הנכונה בכל השאלות</span>
+        <select
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+          aria-label="מיקום התשובה הנכונה בכל שאלה"
+        >
+          <option value="">בחירת מיקום</option>
+          {positions.map((position) => (
+            <option value={String(position)} key={position}>תשובה {position}</option>
+          ))}
+        </select>
+      </label>
+      <p className="field-hint">
+        האפשרויות מבוססות על מספר התשובות המשותף לכל השאלות הכלולות.
+      </p>
+      {notice && <p className="source-review-note" role="status">{notice}</p>}
+    </div>
+  );
+}
+
+function PreambleEditor({ preamble, onChange }) {
+  function updateLine(reviewId, text) {
+    onChange({
+      ...preamble,
+      lines: preamble.lines.map((line) => (
+        line.reviewId === reviewId ? { ...line, text } : line
+      )),
+    });
+  }
+
+  function removeLine(reviewId) {
+    onChange({
+      ...preamble,
+      lines: preamble.lines.filter((line) => line.reviewId !== reviewId),
+    });
+  }
+
+  return (
+    <section className="preamble-editor" aria-labelledby="preamble-title">
+      <div className="preamble-editor-heading">
+        <div>
+          <h3 id="preamble-title">פרטי המבחן והנחיות</h3>
+          <p>אפשר לערוך או להסיר שורות. ההחלטה מה לכלול נעשית במסך יצירת המבחן.</p>
+        </div>
+      </div>
+      {preamble.lines.length > 0 ? (
+        <div className="preamble-lines">
+          {preamble.lines.map((line) => (
+            <div className="preamble-line-editor" key={line.reviewId}>
+              <input
+                type="text"
+                value={line.text}
+                onChange={(event) => updateLine(line.reviewId, event.target.value)}
+                aria-label="עריכת שורת פרטי מבחן או הנחיות"
+                dir="auto"
+              />
+              <button
+                className="remove-choice-button"
+                type="button"
+                onClick={() => removeLine(line.reviewId)}
+                aria-label="הסרת שורת פרטי מבחן או הנחיות"
+                title="הסרת שורה"
+              >×</button>
+            </div>
+          ))}
+        </div>
+      ) : <p className="field-hint">לא נשארו פרטים או הנחיות להצגה.</p>}
+    </section>
+  );
+}
+
 function getInitialTheme() {
   const savedTheme = window.localStorage.getItem("exam-shuffler-theme");
   if (savedTheme === "light" || savedTheme === "dark") return savedTheme;
@@ -282,19 +351,21 @@ export default function App() {
   const [status, setStatus] = useState("idle");
   const [analysis, setAnalysis] = useState(null);
   const [reviewExam, setReviewExam] = useState(null);
-  const [reviewStage, setReviewStage] = useState("review");
+  const [reviewStage, setReviewStage] = useState("choice");
   const [showValidation, setShowValidation] = useState(false);
   const [reviewError, setReviewError] = useState("");
   const [answerSource, setAnswerSource] = useState("none");
   const [sameAnswerPosition, setSameAnswerPosition] = useState("");
-  const [generationSettings, setGenerationSettings] = useState({
-    number_of_versions: "3",
-    shuffle_questions: true,
-    shuffle_choices: true,
-  });
+  const [sharedPositionNotice, setSharedPositionNotice] = useState("");
+  const [pathError, setPathError] = useState("");
+  const [generationBackStage, setGenerationBackStage] = useState("choice");
+  const [generationSettings, setGenerationSettings] = useState(
+    () => ({ ...DEFAULT_GENERATION_SETTINGS }),
+  );
   const [generationStatus, setGenerationStatus] = useState("idle");
   const [generationError, setGenerationError] = useState("");
-  const [zipUrl, setZipUrl] = useState("");
+  const [generatedFiles, setGeneratedFiles] = useState([]);
+  const mountedRef = useRef(true);
   const [error, setError] = useState("");
 
   useEffect(() => {
@@ -302,17 +373,31 @@ export default function App() {
     window.localStorage.setItem("exam-shuffler-theme", theme);
   }, [theme]);
 
+  useEffect(() => (
+    () => revokeGeneratedPdfUrls(generatedFiles)
+  ), [generatedFiles]);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
   function selectFile(event) {
     const selected = event.target.files?.[0] || null;
     setFile(selected);
     setAnalysis(null);
     setReviewExam(null);
-    setReviewStage("review");
+    setReviewStage("choice");
     setShowValidation(false);
     setReviewError("");
+    setSameAnswerPosition("");
+    setSharedPositionNotice("");
+    setPathError("");
     setGenerationStatus("idle");
     setGenerationError("");
-    setZipUrl("");
+    setGeneratedFiles([]);
     setError("");
     setStatus("idle");
   }
@@ -324,18 +409,18 @@ export default function App() {
     setError("");
     setAnalysis(null);
     setReviewExam(null);
-    setReviewStage("review");
+    setReviewStage("choice");
     setShowValidation(false);
     setReviewError("");
+    setSameAnswerPosition("");
+    setSharedPositionNotice("");
+    setPathError("");
     setGenerationStatus("idle");
     setGenerationError("");
-    setZipUrl("");
+    setGeneratedFiles([]);
     const formData = new FormData();
     formData.append("file", file);
     formData.append("answer_source", answerSource);
-    if (answerSource === "same_position" && sameAnswerPosition) {
-      formData.append("same_answer_position", sameAnswerPosition);
-    }
 
     try {
       const response = await fetch(API_URL, { method: "POST", body: formData });
@@ -370,23 +455,82 @@ export default function App() {
     ...(analysis?.analysis_warnings || []),
     ...(analysis?.warnings || []),
   ];
-  const includedQuestions = reviewExam?.questions.filter((question) => question.included) || [];
+  const includedQuestions = getIncludedQuestions(reviewExam);
   const includedCount = includedQuestions.length;
   const totalCount = reviewExam?.questions.length || 0;
   const validationByQuestion = new Map(
-    (reviewExam?.questions || []).map((question) => [question.reviewId, validateQuestion(question)]),
+    (reviewExam?.questions || []).map((question) => [question.reviewId, getQuestionIssues(question)]),
   );
   const correctCount = includedQuestions.filter((question) => question.correct_choice_id).length;
+  const commonAnswerPositions = getCommonAnswerPositions(reviewExam);
+  const commonPositionKey = commonAnswerPositions.join(",");
+  const examDetailCount = reviewExam?.preamble.lines.filter(
+    (line) => line.type !== "instructions",
+  ).length || 0;
+  const instructionCount = reviewExam?.preamble.lines.filter(
+    (line) => line.type === "instructions",
+  ).length || 0;
+  const sharedPositionIsValid = answerSource !== "same_position"
+    || commonAnswerPositions.includes(Number(sameAnswerPosition));
+  const quickShuffleEligibility = getQuickShuffleEligibility(analysis, reviewExam);
+  const generatedVersionCount = generationSettings.multiple_versions
+    ? Number(generationSettings.number_of_versions)
+    : 1;
+  const stageCopy = {
+    choice: ["הניתוח הושלם", "איך תרצו להמשיך?"],
+    review: ["בדיקה ועריכה", "סקירת המבחן"],
+    generation: ["הגדרות יצירה", "יצירת המבחן"],
+    complete: ["היצירה הושלמה", "המבחן מוכן"],
+  }[reviewStage];
+
+  useEffect(() => {
+    if (
+      answerSource === "same_position"
+      && sameAnswerPosition
+      && !commonAnswerPositions.includes(Number(sameAnswerPosition))
+    ) {
+      setSameAnswerPosition("");
+      setSharedPositionNotice(
+        "המיקום שנבחר אינו קיים עוד בכל השאלות הכלולות. יש לבחור מיקום משותף חדש.",
+      );
+      setReviewExam((current) => (
+        current ? clearSharedAnswerPosition(current) : current
+      ));
+    }
+  }, [answerSource, sameAnswerPosition, commonPositionKey]);
+
+  function changeSharedAnswerPosition(value) {
+    setSharedPositionNotice("");
+    if (!value) {
+      setSameAnswerPosition("");
+      setReviewExam((current) => (
+        current ? clearSharedAnswerPosition(current) : current
+      ));
+      return;
+    }
+    const position = Number(value);
+    if (!commonAnswerPositions.includes(position)) {
+      setSharedPositionNotice("המיקום אינו זמין בכל השאלות הכלולות.");
+      return;
+    }
+    setSameAnswerPosition(value);
+    setReviewExam((current) => applySharedAnswerPosition(current, position));
+  }
 
   function updateQuestion(reviewId, updater) {
-    setReviewExam((current) => ({
-      ...current,
-      questions: current.questions.map((question) => (
+    setReviewExam((current) => {
+      const updated = {
+        ...current,
+        questions: current.questions.map((question) => (
         question.reviewId === reviewId
           ? { ...question, ...updater(question) }
           : question
-      )),
-    }));
+        )),
+      };
+      return answerSource === "same_position" && sameAnswerPosition
+        ? applySharedAnswerPosition(updated, Number(sameAnswerPosition))
+        : updated;
+    });
   }
 
   function confirmReview() {
@@ -399,21 +543,51 @@ export default function App() {
     const hasIssues = includedQuestions.some((question) => (
       validationByQuestion.get(question.reviewId).length > 0
     ));
-    if (!hasIssues) setReviewStage("generation");
+    if (hasIssues) {
+      setReviewError("יש לתקן את הבעיות המסומנות בשאלות הכלולות לפני ההמשך.");
+      return;
+    }
+    setGenerationBackStage("review");
+    setReviewStage("generation");
+  }
+
+  function openQuickShuffle() {
+    const currentEligibility = getQuickShuffleEligibility(analysis, reviewExam);
+    if (!currentEligibility.eligible) {
+      setPathError(currentEligibility.reason);
+      return;
+    }
+    setPathError("");
+    setGenerationBackStage("choice");
+    setReviewStage("generation");
+  }
+
+  function openReview() {
+    setPathError("");
+    setReviewStage("review");
   }
 
   async function generateVersions() {
+    if (!sharedPositionIsValid) {
+      setGenerationError("יש לבחור מיקום משותף תקין לתשובה הנכונה.");
+      return;
+    }
     setGenerationStatus("loading");
     setGenerationError("");
+    setGeneratedFiles([]);
     try {
       const response = await fetch(GENERATE_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          reviewed_exam: toReviewedGenerationExam(reviewExam),
+          reviewed_exam: buildReviewedGenerationExam(reviewExam, generationSettings),
           settings: {
-            ...generationSettings,
-            number_of_versions: Number(generationSettings.number_of_versions),
+            number_of_versions: generationSettings.multiple_versions
+              ? Number(generationSettings.number_of_versions)
+              : 1,
+            shuffle_questions: generationSettings.shuffle_questions,
+            shuffle_choices: generationSettings.shuffle_choices,
+            answer_key_mode: generationSettings.answer_key_mode,
           },
         }),
       });
@@ -430,12 +604,15 @@ export default function App() {
         );
       }
 
-      const newZipUrl = URL.createObjectURL(await response.blob());
-      setZipUrl(newZipUrl);
-      const downloadLink = document.createElement("a");
-      downloadLink.href = newZipUrl;
-      downloadLink.download = "exam-versions.zip";
-      downloadLink.click();
+      const pdfFiles = createGeneratedPdfDownloads(await response.arrayBuffer());
+      if (!pdfFiles.length) {
+        throw new Error("השרת לא החזיר קובצי PDF להורדה.");
+      }
+      if (!mountedRef.current) {
+        revokeGeneratedPdfUrls(pdfFiles);
+        return;
+      }
+      setGeneratedFiles(pdfFiles);
       setGenerationStatus("success");
       setReviewStage("complete");
     } catch (generationRequestError) {
@@ -514,19 +691,9 @@ export default function App() {
               </label>
             </div>
             {answerSource === "same_position" && (
-              <label className="answer-position-control">
-                <span>מיקום התשובה הנכונה</span>
-                <select
-                  value={sameAnswerPosition}
-                  onChange={(event) => setSameAnswerPosition(event.target.value)}
-                  aria-label="מיקום התשובה הנכונה בכל שאלה"
-                >
-                  <option value="">בחירת מיקום</option>
-                  {Array.from({ length: 10 }, (_, index) => (
-                    <option value={String(index + 1)} key={index}>תשובה {index + 1}</option>
-                  ))}
-                </select>
-              </label>
+              <p className="field-hint answer-source-hint">
+                מיקום התשובה ייבחר לאחר הניתוח, לפי מספר התשובות שזוהה בפועל.
+              </p>
             )}
           </fieldset>
 
@@ -548,7 +715,7 @@ export default function App() {
               className="analyze-button"
               type="button"
               onClick={analyze}
-              disabled={!file || status === "loading" || (answerSource === "same_position" && !sameAnswerPosition)}
+              disabled={!file || status === "loading"}
             >
               {status === "loading" ? (
                 <><span className="spinner" aria-hidden="true" />מנתח את המבחן...</>
@@ -570,25 +737,36 @@ export default function App() {
           <section className="results-section" aria-labelledby="results-title">
             <div className="results-heading">
               <div>
-                <p className="eyebrow">
-                  {reviewStage === "review" ? "בדיקה ועריכה" : reviewStage === "generation" ? "הגדרות יצירה" : "היצירה הושלמה"}
-                </p>
-                <h2 id="results-title">
-                  {reviewStage === "review" ? "סקירת המבחן" : reviewStage === "generation" ? "הגדרת גרסאות המבחן" : "גרסאות המבחן מוכנות"}
-                </h2>
+                <p className="eyebrow">{stageCopy[0]}</p>
+                <h2 id="results-title">{stageCopy[1]}</h2>
               </div>
               <span className="question-count">{includedCount} מתוך {totalCount} שאלות ייכללו</span>
             </div>
 
             {reviewStage === "complete" ? (
               <div className="completion-panel" role="status">
-                <h3>הגרסאות וקובצי התשובות נוצרו</h3>
-                <p>נוצרו {generationSettings.number_of_versions} מבחנים ומפתחות תשובות.</p>
+                <h3>קובצי המבחן נוצרו</h3>
+                <p>נוצרו {generatedVersionCount} {generatedVersionCount === 1 ? "גרסה" : "גרסאות"}.</p>
                 <p>{includedCount} שאלות בכל גרסה · {correctCount} תשובות ידועות · {includedCount - correctCount} לא הוגדרו</p>
-                {zipUrl && <a className="text-button download-link" href={zipUrl} download="exam-versions.zip">הורדת קובץ ZIP שוב</a>}
+                <div className="generated-file-list" aria-label="קובצי PDF להורדה">
+                  {generatedFiles.map((generatedFile) => (
+                    <article className="generated-file" key={generatedFile.filename}>
+                      <span className="pdf-badge" aria-hidden="true">PDF</span>
+                      <div className="generated-file-details">
+                        <strong>{generatedFile.label}</strong>
+                        <span dir="ltr">{generatedFile.filename}</span>
+                      </div>
+                      <a
+                        className="generated-download"
+                        href={generatedFile.url}
+                        download={generatedFile.filename}
+                      >הורדה</a>
+                    </article>
+                  ))}
+                </div>
                 <button className="text-button" type="button" onClick={() => setReviewStage("generation")}>חזרה להגדרות</button>
               </div>
-            ) : reviewStage === "review" ? (
+            ) : reviewStage === "review" || reviewStage === "choice" ? (
               <div className="summary-strip">
                 <div className="summary-item">
                   <span className="summary-label">סטטוס הניתוח</span>
@@ -607,6 +785,31 @@ export default function App() {
               </div>
             ) : null}
 
+            {reviewStage === "choice" && (
+              <div className="path-choice-panel">
+                <div className="path-actions">
+                  <div className="path-action">
+                    <button
+                      className="analyze-button"
+                      type="button"
+                      onClick={openQuickShuffle}
+                      disabled={!quickShuffleEligibility.eligible}
+                    >ערבול מהיר</button>
+                    {!quickShuffleEligibility.eligible && (
+                      <p className="path-explanation">{quickShuffleEligibility.reason}</p>
+                    )}
+                  </div>
+                  <div className="path-action">
+                    <button className="secondary-action" type="button" onClick={openReview}>
+                      בדיקה ועריכה
+                    </button>
+                    <p className="path-explanation">מעבר על השאלות, התשובות והפרטים לפני היצירה.</p>
+                  </div>
+                </div>
+                {pathError && <p className="error-message" role="alert">{pathError}</p>}
+              </div>
+            )}
+
             {reviewStage === "review" && warnings.length > 0 && (
               <aside className="warning-panel" aria-label="הערות לניתוח">
                 <h3>הערות לבדיקה</h3>
@@ -616,12 +819,24 @@ export default function App() {
 
             {reviewStage === "review" && (
               <>
+                <div className="review-top-actions">
+                  <span>אפשר להמשיך להגדרות בכל שלב; בעיות בשאלות יוצגו לפני המעבר.</span>
+                  <button className="analyze-button confirm-button" type="button" onClick={confirmReview}>
+                    אישור המבחן והמשך
+                  </button>
+                </div>
+                {reviewError && <p className="question-validation review-top-validation" role="alert">{reviewError}</p>}
+                <PreambleEditor
+                  preamble={reviewExam.preamble}
+                  onChange={(preamble) => setReviewExam((current) => ({ ...current, preamble }))}
+                />
                 <div className="question-list">
                   {reviewExam.questions.map((question) => (
                     <QuestionCard
                       question={question}
                       issues={validationByQuestion.get(question.reviewId)}
                       showValidation={showValidation}
+                      sharedAnswerMode={answerSource === "same_position"}
                       onChange={(updater) => updateQuestion(question.reviewId, updater)}
                       key={question.reviewId}
                     />
@@ -630,7 +845,6 @@ export default function App() {
                 <div className="review-footer">
                   <span>{includedCount} מתוך {totalCount} שאלות ייכללו</span>
                   <div className="review-actions-footer">
-                    {reviewError && <p className="question-validation footer-validation" role="alert">{reviewError}</p>}
                     <button className="analyze-button confirm-button" type="button" onClick={confirmReview}>
                     אישור המבחן והמשך
                     </button>
@@ -641,53 +855,152 @@ export default function App() {
 
             {reviewStage === "generation" && (
               <div className="generation-panel">
-                <div className="summary-strip generation-summary">
-                  <div className="summary-item"><span className="summary-label">שאלות</span><span className="summary-value">{includedCount}</span></div>
-                  <div className="summary-item"><span className="summary-label">גרסאות</span><span className="summary-value">{generationSettings.number_of_versions || "—"}</span></div>
-                  <div className="summary-item"><span className="summary-label">ערבוב שאלות</span><span className="summary-value">{generationSettings.shuffle_questions ? "כן" : "לא"}</span></div>
-                  <div className="summary-item"><span className="summary-label">ערבוב תשובות</span><span className="summary-value">{generationSettings.shuffle_choices ? "כן" : "לא"}</span></div>
-                  <div className="summary-item"><span className="summary-label">תשובות ידועות</span><span className="summary-value">{correctCount}</span></div>
-                  <div className="summary-item"><span className="summary-label">תשובות לא ידועות</span><span className="summary-value">{includedCount - correctCount}</span></div>
-                </div>
+                <p className="generation-lead">{includedCount} שאלות ייכללו</p>
+                <p className="generation-detail">{correctCount} תשובות ידועות · {includedCount - correctCount} לא ידועות</p>
                 <div className="generation-controls">
-                  <label className="version-count-control">
-                    <span>מספר גרסאות</span>
-                    <input
-                      type="number"
-                      min="1"
-                      max="10"
-                      step="1"
-                      value={generationSettings.number_of_versions}
-                      onChange={(event) => setGenerationSettings((current) => ({ ...current, number_of_versions: event.target.value }))}
-                    />
-                  </label>
-                  <label className="setting-toggle">
-                    <input
-                      type="checkbox"
-                      checked={generationSettings.shuffle_questions}
-                      onChange={(event) => setGenerationSettings((current) => ({ ...current, shuffle_questions: event.target.checked }))}
-                    />
-                    <span>ערבוב סדר השאלות</span>
-                  </label>
-                  <label className="setting-toggle">
-                    <input
-                      type="checkbox"
-                      checked={generationSettings.shuffle_choices}
-                      onChange={(event) => setGenerationSettings((current) => ({ ...current, shuffle_choices: event.target.checked }))}
-                    />
-                    <span>ערבוב סדר התשובות</span>
-                  </label>
+                  <section className="generation-setting-section" aria-labelledby="content-settings-title">
+                    <h3 id="content-settings-title">1. תוכן</h3>
+                    <div className="included-content-row">
+                      <span aria-hidden="true">✓</span>
+                      <strong>שאלות ותשובות</strong>
+                      <small>נכלל תמיד</small>
+                    </div>
+                    <label className="setting-toggle">
+                      <input
+                        type="checkbox"
+                        checked={generationSettings.include_exam_details}
+                        disabled={examDetailCount === 0}
+                        onChange={(event) => setGenerationSettings((current) => ({ ...current, include_exam_details: event.target.checked }))}
+                      />
+                      <span>פרטי המבחן</span>
+                      <small>{examDetailCount ? `${examDetailCount} שורות זמינות` : "לא זוהו פרטים"}</small>
+                    </label>
+                    <label className="setting-toggle">
+                      <input
+                        type="checkbox"
+                        checked={generationSettings.include_instructions}
+                        disabled={instructionCount === 0}
+                        onChange={(event) => setGenerationSettings((current) => ({ ...current, include_instructions: event.target.checked }))}
+                      />
+                      <span>הוראות המבחן</span>
+                      <small>{instructionCount ? `${instructionCount} שורות זמינות` : "לא זוהו הוראות"}</small>
+                    </label>
+                    {answerSource === "same_position" && (
+                      <SharedAnswerPositionControl
+                        positions={commonAnswerPositions}
+                        value={sameAnswerPosition}
+                        notice={sharedPositionNotice}
+                        onChange={changeSharedAnswerPosition}
+                      />
+                    )}
+                  </section>
+                  <section className="generation-setting-section" aria-labelledby="shuffle-settings-title">
+                    <h3 id="shuffle-settings-title">2. ערבוב</h3>
+                    <label className="setting-toggle">
+                      <input
+                        type="checkbox"
+                        checked={generationSettings.shuffle_questions}
+                        onChange={(event) => setGenerationSettings((current) => ({ ...current, shuffle_questions: event.target.checked }))}
+                      />
+                      <span>ערבוב סדר השאלות</span>
+                    </label>
+                    <label className="setting-toggle">
+                      <input
+                        type="checkbox"
+                        checked={generationSettings.shuffle_choices}
+                        onChange={(event) => setGenerationSettings((current) => ({ ...current, shuffle_choices: event.target.checked }))}
+                      />
+                      <span>ערבוב סדר התשובות</span>
+                    </label>
+                  </section>
+                  <section className="generation-setting-section" aria-labelledby="version-settings-title">
+                    <h3 id="version-settings-title">3. גרסאות</h3>
+                    <label className="setting-toggle">
+                      <input
+                        type="radio"
+                        name="version-mode"
+                        checked={!generationSettings.multiple_versions}
+                        onChange={() => setGenerationSettings((current) => ({
+                          ...current,
+                          multiple_versions: false,
+                          number_of_versions: "1",
+                        }))}
+                      />
+                      <span>גרסה אחת</span>
+                    </label>
+                    <label className="setting-toggle">
+                      <input
+                        type="radio"
+                        name="version-mode"
+                        checked={generationSettings.multiple_versions}
+                        onChange={() => setGenerationSettings((current) => ({
+                          ...current,
+                          multiple_versions: true,
+                          number_of_versions: current.number_of_versions === "1" ? "2" : current.number_of_versions,
+                        }))}
+                      />
+                      <span>מספר גרסאות</span>
+                    </label>
+                    {generationSettings.multiple_versions && (
+                      <label className="version-count-control">
+                        <span>מספר גרסאות</span>
+                        <input
+                          type="number"
+                          min="2"
+                          max="10"
+                          step="1"
+                          value={generationSettings.number_of_versions}
+                          onChange={(event) => setGenerationSettings((current) => ({ ...current, number_of_versions: event.target.value }))}
+                        />
+                      </label>
+                    )}
+                  </section>
+                  <fieldset className="generation-setting-section answer-key-settings">
+                    <legend>4. מפתח תשובות</legend>
+                    <label className="setting-toggle">
+                      <input
+                        type="radio"
+                        name="answer-key-mode"
+                        value="separate"
+                        checked={generationSettings.answer_key_mode === "separate"}
+                        onChange={(event) => setGenerationSettings((current) => ({ ...current, answer_key_mode: event.target.value }))}
+                      />
+                      <span>קובץ נפרד</span>
+                    </label>
+                    <label className="setting-toggle">
+                      <input
+                        type="radio"
+                        name="answer-key-mode"
+                        value="appended"
+                        checked={generationSettings.answer_key_mode === "appended"}
+                        onChange={(event) => setGenerationSettings((current) => ({ ...current, answer_key_mode: event.target.value }))}
+                      />
+                      <span>בסוף המבחן</span>
+                    </label>
+                    <label className="setting-toggle">
+                      <input
+                        type="radio"
+                        name="answer-key-mode"
+                        value="both"
+                        checked={generationSettings.answer_key_mode === "both"}
+                        onChange={(event) => setGenerationSettings((current) => ({ ...current, answer_key_mode: event.target.value }))}
+                      />
+                      <span>גם וגם</span>
+                    </label>
+                  </fieldset>
                 </div>
                 {generationError && <p className="error-message generation-error" role="alert">{generationError}</p>}
                 <div className="generation-actions">
-                  <button className="text-button" type="button" onClick={() => setReviewStage("review")} disabled={generationStatus === "loading"}>חזרה לבדיקה</button>
+                  <button className="text-button" type="button" onClick={() => setReviewStage(generationBackStage)} disabled={generationStatus === "loading"}>
+                    {generationBackStage === "review" ? "חזרה לבדיקה" : "חזרה לבחירת מסלול"}
+                  </button>
                   <button
                     className="analyze-button confirm-button"
                     type="button"
                     onClick={generateVersions}
-                    disabled={generationStatus === "loading" || Number(generationSettings.number_of_versions) < 1 || Number(generationSettings.number_of_versions) > 10}
+                    disabled={generationStatus === "loading" || generatedVersionCount < 1 || generatedVersionCount > 10 || !sharedPositionIsValid}
                   >
-                    {generationStatus === "loading" ? <><span className="spinner" aria-hidden="true" />יוצר גרסאות...</> : "יצירת גרסאות"}
+                    {generationStatus === "loading" ? <><span className="spinner" aria-hidden="true" />יוצר את המבחן...</> : "יצירת המבחן"}
                   </button>
                 </div>
               </div>
